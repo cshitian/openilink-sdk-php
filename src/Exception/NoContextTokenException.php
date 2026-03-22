@@ -10,6 +10,6 @@ final class NoContextTokenException extends RuntimeException
 {
     public function __construct()
     {
-        parent::__construct('No cached context token for this user; user must send a message first.');
+        parent::__construct('ilink: no cached context token; user must send a message first');
     }
 }

@@ -7,10 +7,13 @@
 - 二维码登录
 - 长轮询接收消息
 - 发送文本消息
+- 发送图片、视频、文件消息
 - 获取会话配置
 - 发送打字状态
+- CDN 上传下载与 AES-128-ECB 加解密
 - 获取上传 URL
 - 缓存 `context_token` 并主动推送文本
+- 结构化错误类型（`APIError`、`HTTPError`）
 
 ## 安装
 
@@ -23,6 +26,7 @@ composer require openilink/openilink-sdk-php
 - PHP 8.1+
 - `ext-curl`
 - `ext-json`
+- `ext-openssl`
 
 ## 快速开始
 
@@ -78,7 +82,8 @@ $client = new Client($token, [
     'base_url' => 'https://ilinkai.weixin.qq.com',
     'cdn_base_url' => 'https://novac2c.cdn.weixin.qq.com/c2c',
     'bot_type' => '3',
-    'version' => '1.0.0',
+    'version' => '1.0.2',
+    'route_tag' => 'gray-a',
 ]);
 ```
 
@@ -101,7 +106,7 @@ $result = $client->loginWithQr([
     'bot_id' => 'xxx',
     'base_url' => 'https://...',
     'user_id' => 'xxx',
-    'message' => '与微信连接成功！',
+    'message' => 'connected',
 ]
 ```
 
@@ -142,6 +147,15 @@ $clientId = $client->sendText($toUserId, 'hello', $contextToken);
 $clientId = $client->push($toUserId, 'hello');
 ```
 
+发送媒体：
+
+```php
+$uploaded = $client->uploadFile($fileBytes, $toUserId, \OpenILink\Constants::MEDIA_IMAGE);
+$client->sendImage($toUserId, $contextToken, $uploaded);
+
+$client->sendMediaFile($toUserId, $contextToken, $fileBytes, 'report.pdf', '请查收');
+```
+
 ### 工具方法
 
 提取文本：
@@ -169,4 +183,31 @@ $upload = $client->getUploadUrl([
     'no_need_thumb' => true,
     'aeskey' => '...',
 ]);
+```
+
+CDN 下载：
+
+```php
+$raw = $client->downloadRaw($encryptedQueryParam);
+$plain = $client->downloadFile($encryptedQueryParam, $aesKeyBase64);
+```
+
+错误处理：
+
+```php
+use OpenILink\Exception\APIError;
+use OpenILink\Exception\HTTPError;
+use OpenILink\Exception\NoContextTokenException;
+
+if ($error instanceof APIError && $error->isSessionExpired()) {
+    // 重新登录
+}
+
+if ($error instanceof HTTPError) {
+    echo $error->getStatusCode();
+}
+
+if ($error instanceof NoContextTokenException) {
+    // 用户还没有 context_token
+}
 ```
