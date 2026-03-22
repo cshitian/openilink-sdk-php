@@ -1,28 +1,24 @@
 # openilink-sdk-php
 
-`openilink-sdk-php` 是一个面向 OpenILink Bot API 的 PHP SDK，提供常用能力的轻量封装，便于在 PHP 项目中快速完成登录、收发消息和会话相关操作。
-
-当前支持的核心能力：
-
-- 二维码登录
-- 长轮询接收消息
-- 发送文本消息
-- 发送图片、视频、文件消息
-- 获取会话配置
-- 发送打字状态
-- CDN 上传下载与 AES-128-ECB 加解密
-- 语音消息解码（可插拔 SILK 解码器 + WAV 封装）
-- 获取上传 URL
-- 缓存 `context_token` 并主动推送文本
-- 结构化错误类型（`APIError`、`HTTPError`）
-
-## 安装
+微信 [iLink Bot API](https://ilinkai.weixin.qq.com) 的 PHP SDK。
 
 ```bash
 composer require openilink/openilink-sdk-php
 ```
 
-要求：
+## 特性
+
+- 扫码登录，支持扫码/过期回调
+- 长轮询消息监听，自动重试与退避，动态超时
+- 主动推送（自动缓存 `context_token`）
+- 发送图片、视频、文件，MIME 自动路由
+- CDN 加密上传/下载（AES-128-ECB）
+- 语音消息解码（可插拔 SILK 解码器 + WAV 封装）
+- 输入状态指示器、Bot 配置
+- 结构化错误类型（`APIError`、`HTTPError`、`NoContextTokenException`）
+- 轻量依赖，仅依赖 PHP 扩展
+
+## 要求
 
 - PHP 8.1+
 - `ext-curl`
@@ -44,17 +40,22 @@ use OpenILink\MessageHelper;
 $client = new Client('');
 
 $result = $client->loginWithQr([
-    'on_qrcode' => static function (string $url): void {
-        echo "请扫码:\n{$url}\n";
+    'on_qrcode' => static function (string $img): void {
+        echo "请扫码:\n{$img}\n";
     },
     'on_scanned' => static function (): void {
-        echo "已扫码，请在微信中确认\n";
+        echo "已扫码，请在微信中确认...\n";
     },
 ]);
 
 if (!($result['connected'] ?? false)) {
     throw new RuntimeException((string) ($result['message'] ?? '登录失败'));
 }
+
+echo '已连接 BotID=' . (string) ($result['bot_id'] ?? '') . PHP_EOL;
+
+$syncBufFile = __DIR__ . '/sync_buf.dat';
+$savedBuf = is_file($syncBufFile) ? (string) file_get_contents($syncBufFile) : '';
 
 $client->monitor(
     static function (array $message) use ($client): void {
@@ -63,74 +64,62 @@ $client->monitor(
             return;
         }
 
-        $client->sendText(
-            (string) $message['from_user_id'],
-            '收到: ' . $text,
-            (string) $message['context_token'],
-        );
-    }
+        $client->push((string) $message['from_user_id'], '收到: ' . $text);
+    },
+    [
+        'initial_buf' => $savedBuf,
+        'on_buf_update' => static function (string $buf) use ($syncBufFile): void {
+            file_put_contents($syncBufFile, $buf);
+        },
+    ],
 );
 ```
-
-完整示例见 [example/echo.php](./example/echo.php)。
 
 ## API
 
 ### 创建客户端
 
 ```php
+use OpenILink\Client;
+
 $client = new Client($token, [
-    'base_url' => 'https://ilinkai.weixin.qq.com',
-    'cdn_base_url' => 'https://novac2c.cdn.weixin.qq.com/c2c',
+    'base_url' => 'https://custom.endpoint.com',
+    'cdn_base_url' => 'https://custom.cdn.com/c2c',
     'bot_type' => '3',
     'version' => '1.0.2',
-    'route_tag' => 'gray-a',
+    'route_tag' => 'my-route-tag',
     'silk_decoder' => static function (string $silkData, int $sampleRate): string {
         return decodeSilkSomehow($silkData, $sampleRate);
     },
 ]);
 ```
 
-### 登录
+### 扫码登录
 
 ```php
 $result = $client->loginWithQr([
-    'on_qrcode' => static function (string $url): void {},
+    'on_qrcode' => static function (string $imgContent): void {},
     'on_scanned' => static function (): void {},
     'on_expired' => static function (int $attempt, int $max): void {},
 ]);
 ```
 
-返回值示例：
+登录成功后，客户端的 Token 和 BaseURL 会自动更新。
+
+### 接收消息
 
 ```php
-[
-    'connected' => true,
-    'bot_token' => 'xxx',
-    'bot_id' => 'xxx',
-    'base_url' => 'https://...',
-    'user_id' => 'xxx',
-    'message' => 'connected',
-]
-```
+use OpenILink\MessageHelper;
 
-### 收消息
-
-```php
-$response = $client->getUpdates($buf);
-```
-
-或直接进入监听循环：
-
-```php
 $client->monitor(
     static function (array $message): void {
-        // 处理单条消息
+        $text = MessageHelper::extractText($message);
+        // $message['from_user_id'], $message['context_token'], $message['item_list']
     },
     [
-        'initial_buf' => '',
+        'initial_buf' => $savedBuf,
         'on_buf_update' => static function (string $buf): void {},
-        'on_error' => static function (Throwable $e): void {},
+        'on_error' => static function (Throwable $error): void {},
         'on_session_expired' => static function (): void {},
         'should_continue' => static function (): bool {
             return true;
@@ -139,64 +128,56 @@ $client->monitor(
 );
 ```
 
-### 发消息
+`monitor()` 会自动缓存每个用户的 `context_token`，供 `push()` 使用。服务端返回的 `longpolling_timeout_ms` 会被自动采纳。
+
+### 发送文本
 
 ```php
-$clientId = $client->sendText($toUserId, 'hello', $contextToken);
+$client->sendText($userId, '你好', $contextToken);
+$client->push($userId, '这是一条定时通知');
 ```
 
-如果目标用户已经有缓存的 `context_token`：
+### 发送媒体
 
 ```php
-$clientId = $client->push($toUserId, 'hello');
+use OpenILink\Constants;
+
+$data = file_get_contents('photo.jpg');
+
+// 高级接口：自动识别 MIME 类型 -> 上传 -> 发送
+$client->sendMediaFile($userId, $contextToken, $data, 'photo.jpg', '看看这张图');
+
+// 分步操作：上传 -> 发送
+$uploaded = $client->uploadFile($data, $userId, Constants::MEDIA_IMAGE);
+$client->sendImage($userId, $contextToken, $uploaded);
+$client->sendVideo($userId, $contextToken, $uploaded);
+$client->sendFileAttachment($userId, $contextToken, 'report.pdf', $uploaded);
 ```
 
-发送媒体：
+### 下载媒体
 
 ```php
-$uploaded = $client->uploadFile($fileBytes, $toUserId, \OpenILink\Constants::MEDIA_IMAGE);
-$client->sendImage($toUserId, $contextToken, $uploaded);
+use OpenILink\Constants;
 
-$client->sendMediaFile($toUserId, $contextToken, $fileBytes, 'report.pdf', '请查收');
+foreach (($message['item_list'] ?? []) as $item) {
+    switch ($item['type'] ?? null) {
+        case Constants::ITEM_TYPE_IMAGE:
+            $data = $client->downloadFile(
+                (string) ($item['image_item']['media']['encrypt_query_param'] ?? ''),
+                (string) ($item['image_item']['media']['aes_key'] ?? ''),
+            );
+            break;
+
+        case Constants::ITEM_TYPE_VOICE:
+            $wav = $client->downloadVoice($item['voice_item']['media'] ?? null);
+            break;
+    }
+}
 ```
 
-### 工具方法
+### 语音解码
 
-提取文本：
-
-```php
-$text = MessageHelper::extractText($message);
-```
-
-发送打字状态：
-
-```php
-$client->sendTyping($userId, $typingTicket, \OpenILink\Constants::TYPING);
-```
-
-获取上传 URL：
-
-```php
-$upload = $client->getUploadUrl([
-    'filekey' => 'demo.jpg',
-    'media_type' => \OpenILink\Constants::MEDIA_IMAGE,
-    'to_user_id' => $toUserId,
-    'rawsize' => 12345,
-    'rawfilemd5' => '...',
-    'filesize' => 12345,
-    'no_need_thumb' => true,
-    'aeskey' => '...',
-]);
-```
-
-CDN 下载：
-
-```php
-$raw = $client->downloadRaw($encryptedQueryParam);
-$plain = $client->downloadFile($encryptedQueryParam, $aesKeyBase64);
-```
-
-语音消息解码：
+SDK 通过可插拔的 `silk_decoder` 支持语音消息解码，保持对外部解码器的开放性：
 
 ```php
 use OpenILink\Client;
@@ -208,26 +189,85 @@ $client = new Client($token, [
     },
 ]);
 
-$wav = $client->downloadVoice($message['item_list'][0]['voice_item']['media'] ?? null);
-$wrapped = Voice::buildWav($pcmBytes, 24000, 1, 16);
+$wav = $client->downloadVoice($voiceMedia);
 ```
 
-错误处理：
+也可以单独使用 WAV 封装：
+
+```php
+$wav = Voice::buildWav($pcmBytes, 24000, 1, 16);
+```
+
+### 其他
+
+```php
+use OpenILink\Constants;
+use OpenILink\MessageHelper;
+use OpenILink\Mime;
+
+$client->sendTyping($userId, $typingTicket, Constants::TYPING);
+$client->sendTyping($userId, $typingTicket, Constants::CANCEL_TYPING);
+
+$config = $client->getConfig($userId, $contextToken);
+
+$text = MessageHelper::extractText($message);
+$isMedia = MessageHelper::isMediaItem($item);
+
+$mime = Mime::mimeFromFilename('photo.jpg');     // image/jpeg
+$ext = Mime::extensionFromMime('image/jpg');     // .jpg
+$isImage = Mime::isImageMime('image/png');       // true
+$isVideo = Mime::isVideoMime('video/mp4');       // true
+```
+
+## 错误处理
 
 ```php
 use OpenILink\Exception\APIError;
 use OpenILink\Exception\HTTPError;
 use OpenILink\Exception\NoContextTokenException;
+use OpenILink\Exception\RequestException;
 
-if ($error instanceof APIError && $error->isSessionExpired()) {
-    // 重新登录
-}
-
-if ($error instanceof HTTPError) {
+try {
+    $client->push($userId, 'hello');
+} catch (APIError $error) {
+    if ($error->isSessionExpired()) {
+        // 需要重新登录
+    }
+} catch (HTTPError $error) {
     echo $error->getStatusCode();
-}
-
-if ($error instanceof NoContextTokenException) {
-    // 用户还没有 context_token
+} catch (NoContextTokenException $error) {
+    // 该用户尚未发送过消息，无法主动推送
+} catch (RequestException $error) {
+    if ($error->isTimeout()) {
+        // 请求超时
+    }
 }
 ```
+
+## 常量
+
+```php
+use OpenILink\Constants;
+
+Constants::MEDIA_IMAGE;        // 1
+Constants::MEDIA_VIDEO;        // 2
+Constants::MEDIA_FILE;         // 3
+Constants::MEDIA_VOICE;        // 4
+
+Constants::MESSAGE_TYPE_USER;  // 1
+Constants::MESSAGE_TYPE_BOT;   // 2
+
+Constants::ITEM_TYPE_TEXT;     // 1
+Constants::ITEM_TYPE_IMAGE;    // 2
+Constants::ITEM_TYPE_VOICE;    // 3
+Constants::ITEM_TYPE_FILE;     // 4
+Constants::ITEM_TYPE_VIDEO;    // 5
+
+Constants::MESSAGE_STATE_NEW;        // 0
+Constants::MESSAGE_STATE_GENERATING; // 1
+Constants::MESSAGE_STATE_FINISH;     // 2
+```
+
+## 许可证
+
+MIT

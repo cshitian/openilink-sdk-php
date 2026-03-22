@@ -14,6 +14,9 @@
       "OpenILink\\": "src/"
     }
   },
+  "scripts": {
+    "test": "php tests/MimeTest.php"
+  },
   "authors": [
     {
       "name": "openilink"
