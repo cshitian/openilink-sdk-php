@@ -162,13 +162,11 @@ final class Client
     {
         $clientId = $this->generateClientId();
 
-        $this->sendMessage([
-            'to_user_id' => $to,
-            'client_id' => $clientId,
-            'message_type' => Constants::MESSAGE_TYPE_BOT,
-            'message_state' => Constants::MESSAGE_STATE_FINISH,
-            'context_token' => $contextToken,
-            'item_list' => [
+        $this->sendMessage($this->buildOutgoingMessage(
+            $to,
+            $clientId,
+            $contextToken,
+            [
                 [
                     'type' => Constants::ITEM_TYPE_TEXT,
                     'text_item' => [
@@ -176,7 +174,7 @@ final class Client
                     ],
                 ],
             ],
-        ]);
+        ));
 
         return $clientId;
     }
@@ -492,13 +490,11 @@ final class Client
     {
         $clientId = $this->generateClientId();
 
-        $this->sendMessage([
-            'to_user_id' => $to,
-            'client_id' => $clientId,
-            'message_type' => Constants::MESSAGE_TYPE_BOT,
-            'message_state' => Constants::MESSAGE_STATE_FINISH,
-            'context_token' => $contextToken,
-            'item_list' => [
+        $this->sendMessage($this->buildOutgoingMessage(
+            $to,
+            $clientId,
+            $contextToken,
+            [
                 [
                     'type' => Constants::ITEM_TYPE_IMAGE,
                     'image_item' => [
@@ -511,7 +507,7 @@ final class Client
                     ],
                 ],
             ],
-        ]);
+        ));
 
         return $clientId;
     }
@@ -528,13 +524,11 @@ final class Client
     {
         $clientId = $this->generateClientId();
 
-        $this->sendMessage([
-            'to_user_id' => $to,
-            'client_id' => $clientId,
-            'message_type' => Constants::MESSAGE_TYPE_BOT,
-            'message_state' => Constants::MESSAGE_STATE_FINISH,
-            'context_token' => $contextToken,
-            'item_list' => [
+        $this->sendMessage($this->buildOutgoingMessage(
+            $to,
+            $clientId,
+            $contextToken,
+            [
                 [
                     'type' => Constants::ITEM_TYPE_VIDEO,
                     'video_item' => [
@@ -547,7 +541,7 @@ final class Client
                     ],
                 ],
             ],
-        ]);
+        ));
 
         return $clientId;
     }
@@ -564,13 +558,11 @@ final class Client
     {
         $clientId = $this->generateClientId();
 
-        $this->sendMessage([
-            'to_user_id' => $to,
-            'client_id' => $clientId,
-            'message_type' => Constants::MESSAGE_TYPE_BOT,
-            'message_state' => Constants::MESSAGE_STATE_FINISH,
-            'context_token' => $contextToken,
-            'item_list' => [
+        $this->sendMessage($this->buildOutgoingMessage(
+            $to,
+            $clientId,
+            $contextToken,
+            [
                 [
                     'type' => Constants::ITEM_TYPE_FILE,
                     'file_item' => [
@@ -584,7 +576,7 @@ final class Client
                     ],
                 ],
             ],
-        ]);
+        ));
 
         return $clientId;
     }
@@ -705,8 +697,9 @@ final class Client
             $headers['Content-Length'] = (string) strlen($body);
         }
 
-        if ($this->token !== '') {
-            $headers['Authorization'] = 'Bearer ' . $this->token;
+        $token = trim($this->token);
+        if ($token !== '') {
+            $headers['Authorization'] = 'Bearer ' . $token;
         }
 
         if ($this->routeTag !== '') {
@@ -714,6 +707,17 @@ final class Client
         }
 
         return $headers;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function buildUploadHeaders(string $body): array
+    {
+        return [
+            'Content-Type' => 'application/octet-stream',
+            'Content-Length' => (string) strlen($body),
+        ];
     }
 
     /**
@@ -776,7 +780,7 @@ final class Client
         $responseHeaders = [];
         $options = [
             CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_HTTPHEADER => $headerLines,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT_MS => $timeoutMs,
@@ -837,6 +841,23 @@ final class Client
         ];
     }
 
+    /**
+     * @param list<array<string, mixed>> $itemList
+     * @return array<string, mixed>
+     */
+    private function buildOutgoingMessage(string $to, string $clientId, string $contextToken, array $itemList): array
+    {
+        return [
+            'from_user_id' => '',
+            'to_user_id' => $to,
+            'client_id' => $clientId,
+            'message_type' => Constants::MESSAGE_TYPE_BOT,
+            'message_state' => Constants::MESSAGE_STATE_FINISH,
+            'context_token' => $contextToken,
+            'item_list' => $itemList,
+        ];
+    }
+
     private function uploadToCDN(string $cdnUrl, string $ciphertext): string
     {
         $lastException = null;
@@ -873,13 +894,33 @@ final class Client
 
     private function doUpload(string $cdnUrl, string $ciphertext): string
     {
-        $response = $this->request(
-            'POST',
-            $cdnUrl,
-            $this->buildHeaders($ciphertext, ['Content-Type' => 'application/octet-stream']),
-            $ciphertext,
-            self::DEFAULT_CDN_TIMEOUT_MS,
-        );
+        try {
+            $response = $this->request(
+                'POST',
+                $cdnUrl,
+                $this->buildUploadHeaders($ciphertext),
+                $ciphertext,
+                self::DEFAULT_CDN_TIMEOUT_MS,
+            );
+        } catch (HTTPError $exception) {
+            $headers = $exception->getHeaders();
+            $body = $exception->getBody();
+            $errorMessage = $headers['x-error-message'] ?? '';
+
+            if ($errorMessage === '' && $body !== '') {
+                $errorMessage = $body;
+            }
+
+            if ($errorMessage === '') {
+                $errorMessage = sprintf('status %d', $exception->getStatusCode());
+            }
+
+            if ($errorMessage !== $body) {
+                throw new HTTPError($exception->getStatusCode(), $errorMessage, $headers);
+            }
+
+            throw $exception;
+        }
 
         $downloadParam = $response['headers']['x-encrypted-param'] ?? '';
         if ($downloadParam === '') {
