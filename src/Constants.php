@@ -32,6 +32,7 @@ final class Constants
     public const MEDIA_VIDEO = 2;
     public const MEDIA_FILE = 3;
     public const MEDIA_VOICE = 4;
+    public const ENCRYPT_AES128_ECB = 1;
 
     public const SESSION_EXPIRED_ERR_CODE = -14;
 }

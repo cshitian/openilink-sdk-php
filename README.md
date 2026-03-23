@@ -15,6 +15,7 @@ composer require openilink/openilink-sdk-php
 - CDN 加密上传/下载（AES-128-ECB）
 - 语音消息解码（可插拔 SILK 解码器 + WAV 封装）
 - 输入状态指示器、Bot 配置
+- 可注入自定义 transport，便于测试或接入自有 HTTP 栈
 - 结构化错误类型（`APIError`、`HTTPError`、`NoContextTokenException`）
 - 轻量依赖，仅依赖 PHP 扩展
 
@@ -68,6 +69,10 @@ $client->monitor(
     },
     [
         'initial_buf' => $savedBuf,
+        'on_response' => static function (array $response): void {
+            echo (string) ($response['sync_buf'] ?? '') . PHP_EOL;
+            echo (string) ($response['raw_response']['status_code'] ?? 0) . PHP_EOL;
+        },
         'on_buf_update' => static function (string $buf) use ($syncBufFile): void {
             file_put_contents($syncBufFile, $buf);
         },
@@ -83,14 +88,27 @@ $client->monitor(
 use OpenILink\Client;
 
 $client = new Client($token, [
-    'base_url' => 'https://custom.endpoint.com',
-    'cdn_base_url' => 'https://custom.cdn.com/c2c',
-    'bot_type' => '3',
-    'version' => '1.0.2',
-    'route_tag' => 'my-route-tag',
-    'silk_decoder' => static function (string $silkData, int $sampleRate): string {
-        return decodeSilkSomehow($silkData, $sampleRate);
-    },
+  'base_url' => 'https://custom.endpoint.com',
+  'cdn_base_url' => 'https://custom.cdn.com/c2c',
+  'bot_type' => '3',
+  'version' => '1.0.2',
+  'route_tag' => 'my-route-tag',
+  'transport' => static function (
+      string $method,
+      string $url,
+      array $headers,
+      ?string $body,
+      int $timeoutMs,
+  ): array {
+      return [
+          'status_code' => 200,
+          'body' => '{}',
+          'headers' => ['content-type' => 'application/json'],
+      ];
+  },
+  'silk_decoder' => static function (string $silkData, int $sampleRate): string {
+      return decodeSilkSomehow($silkData, $sampleRate);
+  },
 ]);
 ```
 
@@ -118,6 +136,7 @@ $client->monitor(
     },
     [
         'initial_buf' => $savedBuf,
+        'on_response' => static function (array $response): void {},
         'on_buf_update' => static function (string $buf): void {},
         'on_error' => static function (Throwable $error): void {},
         'on_session_expired' => static function (): void {},
@@ -128,7 +147,7 @@ $client->monitor(
 );
 ```
 
-`monitor()` 会自动缓存每个用户的 `context_token`，供 `push()` 使用。服务端返回的 `longpolling_timeout_ms` 会被自动采纳。
+`monitor()` 会自动缓存每个用户的 `context_token`，供 `push()` 使用。服务端返回的 `longpolling_timeout_ms` 会被自动采纳；成功响应里的 `sync_buf` 和原始 HTTP 元数据可通过 `on_response` / `raw_response` 读取。
 
 ### 发送文本
 
@@ -169,7 +188,7 @@ foreach (($message['item_list'] ?? []) as $item) {
             break;
 
         case Constants::ITEM_TYPE_VOICE:
-            $wav = $client->downloadVoice($item['voice_item']['media'] ?? null);
+            $wav = $client->downloadVoice($item['voice_item'] ?? null);
             break;
     }
 }
@@ -189,7 +208,7 @@ $client = new Client($token, [
     },
 ]);
 
-$wav = $client->downloadVoice($voiceMedia);
+$wav = $client->downloadVoice($voiceItem);
 ```
 
 也可以单独使用 WAV 封装：

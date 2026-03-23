@@ -35,6 +35,14 @@ final class Client
      * @var null|callable(string, int): string
      */
     private $silkDecoder = null;
+    /**
+     * @var null|callable(string, string, array<string, string>, ?string, int): array{
+     *     status_code: int,
+     *     body: string,
+     *     headers?: array<string, string>
+     * }
+     */
+    private $transport = null;
 
     /**
      * @var array<string, string>
@@ -51,6 +59,9 @@ final class Client
         $this->routeTag = (string) ($config['route_tag'] ?? '');
         if (isset($config['silk_decoder']) && is_callable($config['silk_decoder'])) {
             $this->silkDecoder = $config['silk_decoder'];
+        }
+        if (isset($config['transport']) && is_callable($config['transport'])) {
+            $this->transport = $config['transport'];
         }
     }
 
@@ -122,6 +133,18 @@ final class Client
         $this->silkDecoder = $silkDecoder;
     }
 
+    /**
+     * @param callable(string, string, array<string, string>, ?string, int): array{
+     *     status_code: int,
+     *     body: string,
+     *     headers?: array<string, string>
+     * } $transport
+     */
+    public function setTransport(callable $transport): void
+    {
+        $this->transport = $transport;
+    }
+
     public function getUpdates(string $getUpdatesBuf = '', ?int $timeoutMs = null): array
     {
         $request = [
@@ -130,7 +153,7 @@ final class Client
         ];
 
         try {
-            $body = $this->doPost('ilink/bot/getupdates', $request, $timeoutMs ?? self::DEFAULT_LONG_POLL_TIMEOUT_MS);
+            $response = $this->doPost('ilink/bot/getupdates', $request, $timeoutMs ?? self::DEFAULT_LONG_POLL_TIMEOUT_MS);
         } catch (RequestException $exception) {
             if ($exception->isTimeout()) {
                 return [
@@ -143,7 +166,7 @@ final class Client
             throw $exception;
         }
 
-        return $this->decodeJson($body, 'getUpdates');
+        return $this->withRawResponse($this->decodeJson($response['body'], 'getUpdates'), $response);
     }
 
     public function sendMessage(array $message): void
@@ -181,7 +204,7 @@ final class Client
 
     public function getConfig(string $userId, string $contextToken): array
     {
-        $body = $this->doPost(
+        $response = $this->doPost(
             'ilink/bot/getconfig',
             [
                 'ilink_user_id' => $userId,
@@ -191,7 +214,7 @@ final class Client
             self::DEFAULT_CONFIG_TIMEOUT_MS,
         );
 
-        return $this->decodeJson($body, 'getConfig');
+        return $this->withRawResponse($this->decodeJson($response['body'], 'getConfig'), $response);
     }
 
     public function sendTyping(string $userId, string $typingTicket, int $status): void
@@ -212,9 +235,9 @@ final class Client
     {
         $request['base_info'] = $this->buildBaseInfo();
 
-        $body = $this->doPost('ilink/bot/getuploadurl', $request, self::DEFAULT_API_TIMEOUT_MS);
+        $response = $this->doPost('ilink/bot/getuploadurl', $request, self::DEFAULT_API_TIMEOUT_MS);
 
-        return $this->decodeJson($body, 'getUploadUrl');
+        return $this->withRawResponse($this->decodeJson($response['body'], 'getUploadUrl'), $response);
     }
 
     public function fetchQRCode(): array
@@ -223,13 +246,21 @@ final class Client
             'bot_type' => $this->botType !== '' ? $this->botType : Constants::DEFAULT_BOT_TYPE,
         ]);
 
-        $body = $this->doGet(
-            $this->buildUrl('ilink/bot/get_bot_qrcode') . '?' . $query,
-            $this->routeTagHeaders(),
-            self::DEFAULT_API_TIMEOUT_MS,
-        );
+        try {
+            $response = $this->doGet(
+                $this->buildUrl('ilink/bot/get_bot_qrcode') . '?' . $query,
+                $this->routeTagHeaders(),
+                self::DEFAULT_API_TIMEOUT_MS,
+            );
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: fetch QR code: ' . $exception->getMessage(), 0, $exception);
+        }
 
-        return $this->decodeJson($body, 'fetchQRCode');
+        try {
+            return $this->withRawResponse($this->decodeJson($response['body'], 'fetchQRCode'), $response);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: unmarshal QR response: ' . $exception->getMessage(), 0, $exception);
+        }
     }
 
     public function pollQRStatus(string $qrcode): array
@@ -237,7 +268,7 @@ final class Client
         $query = http_build_query(['qrcode' => $qrcode]);
 
         try {
-            $body = $this->doGet(
+            $response = $this->doGet(
                 $this->buildUrl('ilink/bot/get_qrcode_status') . '?' . $query,
                 $this->routeTagHeaders() + ['iLink-App-ClientVersion' => '1'],
                 self::QR_LONG_POLL_TIMEOUT_MS,
@@ -250,7 +281,11 @@ final class Client
             throw $exception;
         }
 
-        return $this->decodeJson($body, 'pollQRStatus');
+        try {
+            return $this->withRawResponse($this->decodeJson($response['body'], 'pollQRStatus'), $response);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: unmarshal QR status: ' . $exception->getMessage(), 0, $exception);
+        }
     }
 
     /**
@@ -272,7 +307,11 @@ final class Client
         $refreshCount = 1;
 
         while (microtime(true) <= $deadline) {
-            $status = $this->pollQRStatus($currentQr);
+            try {
+                $status = $this->pollQRStatus($currentQr);
+            } catch (\Throwable $exception) {
+                throw new RuntimeException('ilink: poll QR status: ' . $exception->getMessage(), 0, $exception);
+            }
 
             switch ((string) ($status['status'] ?? 'wait')) {
                 case 'scaned':
@@ -293,7 +332,11 @@ final class Client
 
                     $this->invokeCallback($callbacks['on_expired'] ?? null, $refreshCount, self::MAX_QR_REFRESH_COUNT);
 
-                    $qr = $this->fetchQRCode();
+                    try {
+                        $qr = $this->fetchQRCode();
+                    } catch (\Throwable $exception) {
+                        throw new RuntimeException('ilink: refresh QR code: ' . $exception->getMessage(), 0, $exception);
+                    }
                     $currentQr = (string) ($qr['qrcode'] ?? '');
                     $scannedNotified = false;
                     $this->invokeCallback($callbacks['on_qrcode'] ?? null, (string) ($qr['qrcode_img_content'] ?? ''));
@@ -339,6 +382,7 @@ final class Client
      *     on_buf_update?: callable(string): void,
      *     on_error?: callable(\Throwable): void,
      *     on_session_expired?: callable(): void,
+     *     on_response?: callable(array): void,
      *     should_continue?: callable(): bool
      * } $options
      */
@@ -413,6 +457,7 @@ final class Client
             }
 
             $failures = 0;
+            $this->invokeCallback($options['on_response'] ?? null, $response);
 
             if (!empty($response['get_updates_buf'])) {
                 $buf = (string) $response['get_updates_buf'];
@@ -592,23 +637,35 @@ final class Client
             $mediaType = Constants::MEDIA_IMAGE;
         }
 
-        $uploaded = $this->uploadFile($data, $to, $mediaType);
+        try {
+            $uploaded = $this->uploadFile($data, $to, $mediaType);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: upload media: ' . $exception->getMessage(), 0, $exception);
+        }
 
         if ($caption !== '') {
-            $this->sendText($to, $caption, $contextToken);
+            try {
+                $this->sendText($to, $caption, $contextToken);
+            } catch (\Throwable $exception) {
+                throw new RuntimeException('ilink: send caption: ' . $exception->getMessage(), 0, $exception);
+            }
         }
 
-        if (Mime::isVideoMime($mime)) {
-            $this->sendVideo($to, $contextToken, $uploaded);
-            return;
-        }
+        try {
+            if (Mime::isVideoMime($mime)) {
+                $this->sendVideo($to, $contextToken, $uploaded);
+                return;
+            }
 
-        if (Mime::isImageMime($mime)) {
-            $this->sendImage($to, $contextToken, $uploaded);
-            return;
-        }
+            if (Mime::isImageMime($mime)) {
+                $this->sendImage($to, $contextToken, $uploaded);
+                return;
+            }
 
-        $this->sendFileAttachment($to, $contextToken, basename($fileName), $uploaded);
+            $this->sendFileAttachment($to, $contextToken, basename($fileName), $uploaded);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: send media: ' . $exception->getMessage(), 0, $exception);
+        }
     }
 
     public function downloadFile(string $encryptedQueryParam, string $aesKeyBase64): string
@@ -632,22 +689,37 @@ final class Client
         return $response['body'];
     }
 
-    public function downloadVoice(?array $media): string
+    public function downloadVoice(?array $voiceItem): string
     {
         if ($this->silkDecoder === null) {
             throw new RuntimeException('ilink: no SILK decoder configured; use config["silk_decoder"] or setSilkDecoder()');
         }
 
-        if ($media === null) {
-            throw new RuntimeException('ilink: voice media is nil');
+        $media = is_array($voiceItem) ? ($voiceItem['media'] ?? null) : null;
+        if (!is_array($voiceItem) || !is_array($media)) {
+            throw new RuntimeException('ilink: voice item or media is nil');
         }
 
         $encryptedQueryParam = (string) ($media['encrypt_query_param'] ?? '');
         $aesKey = (string) ($media['aes_key'] ?? '');
-        $silkData = $this->downloadFile($encryptedQueryParam, $aesKey);
-        $pcm = ($this->silkDecoder)($silkData, Voice::DEFAULT_SAMPLE_RATE);
+        try {
+            $silkData = $this->downloadFile($encryptedQueryParam, $aesKey);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: download voice: ' . $exception->getMessage(), 0, $exception);
+        }
 
-        return Voice::buildWav($pcm, Voice::DEFAULT_SAMPLE_RATE, 1, 16);
+        $sampleRate = (int) ($voiceItem['sample_rate'] ?? Voice::DEFAULT_SAMPLE_RATE);
+        if ($sampleRate <= 0) {
+            $sampleRate = Voice::DEFAULT_SAMPLE_RATE;
+        }
+
+        try {
+            $pcm = ($this->silkDecoder)($silkData, $sampleRate);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('ilink: decode voice: ' . $exception->getMessage(), 0, $exception);
+        }
+
+        return Voice::buildWav($pcm, $sampleRate, 1, 16);
     }
 
     public function setContextToken(string $userId, string $token): void
@@ -732,7 +804,10 @@ final class Client
         return ['SKRouteTag' => $this->routeTag];
     }
 
-    private function doPost(string $endpoint, array $payload, int $timeoutMs): string
+    /**
+     * @return array{status_code: int, body: string, headers: array<string, string>}
+     */
+    private function doPost(string $endpoint, array $payload, int $timeoutMs): array
     {
         try {
             $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
@@ -748,14 +823,15 @@ final class Client
             $timeoutMs,
         );
 
-        return $response['body'];
+        return $response;
     }
 
-    private function doGet(string $url, array $headers, int $timeoutMs): string
+    /**
+     * @return array{status_code: int, body: string, headers: array<string, string>}
+     */
+    private function doGet(string $url, array $headers, int $timeoutMs): array
     {
-        $response = $this->request('GET', $url, $headers, null, $timeoutMs);
-
-        return $response['body'];
+        return $this->request('GET', $url, $headers, null, $timeoutMs);
     }
 
     /**
@@ -763,72 +839,79 @@ final class Client
      */
     private function request(string $method, string $url, array $headers, ?string $body, int $timeoutMs): array
     {
-        if (!function_exists('curl_init')) {
-            throw new RuntimeException('ext-curl is required.');
-        }
+        if ($this->transport !== null) {
+            $response = ($this->transport)($method, $url, $headers, $body, $timeoutMs);
+            $statusCode = (int) ($response['status_code'] ?? 0);
+            $responseBody = (string) ($response['body'] ?? '');
+            $responseHeaders = $this->normalizeResponseHeaders($response['headers'] ?? []);
+        } else {
+            if (!function_exists('curl_init')) {
+                throw new RuntimeException('ext-curl is required.');
+            }
 
-        $curl = curl_init($url);
-        if ($curl === false) {
-            throw new RuntimeException('Failed to initialize cURL.');
-        }
+            $curl = curl_init($url);
+            if ($curl === false) {
+                throw new RuntimeException('Failed to initialize cURL.');
+            }
 
-        $headerLines = [];
-        foreach ($headers as $name => $value) {
-            $headerLines[] = $name . ': ' . $value;
-        }
+            $headerLines = [];
+            foreach ($headers as $name => $value) {
+                $headerLines[] = $name . ': ' . $value;
+            }
 
-        $responseHeaders = [];
-        $options = [
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_HTTPHEADER => $headerLines,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT_MS => $timeoutMs,
-            CURLOPT_CONNECTTIMEOUT_MS => min($timeoutMs, 10000),
-            CURLOPT_NOSIGNAL => true,
-            CURLOPT_HEADERFUNCTION => static function ($curlHandle, string $headerLine) use (&$responseHeaders): int {
-                $length = strlen($headerLine);
-                $trimmed = trim($headerLine);
+            $responseHeaders = [];
+            $options = [
+                CURLOPT_CUSTOMREQUEST => $method,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_HTTPHEADER => $headerLines,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS => $timeoutMs,
+                CURLOPT_CONNECTTIMEOUT_MS => min($timeoutMs, 10000),
+                CURLOPT_NOSIGNAL => true,
+                CURLOPT_HEADERFUNCTION => static function ($curlHandle, string $headerLine) use (&$responseHeaders): int {
+                    $length = strlen($headerLine);
+                    $trimmed = trim($headerLine);
 
-                if ($trimmed === '' || str_starts_with($trimmed, 'HTTP/')) {
+                    if ($trimmed === '' || str_starts_with($trimmed, 'HTTP/')) {
+                        return $length;
+                    }
+
+                    $parts = explode(':', $headerLine, 2);
+                    if (count($parts) !== 2) {
+                        return $length;
+                    }
+
+                    $name = strtolower(trim($parts[0]));
+                    $value = trim($parts[1]);
+                    if ($name !== '') {
+                        $responseHeaders[$name] = isset($responseHeaders[$name])
+                            ? $responseHeaders[$name] . ', ' . $value
+                            : $value;
+                    }
+
                     return $length;
-                }
+                },
+            ];
 
-                $parts = explode(':', $headerLine, 2);
-                if (count($parts) !== 2) {
-                    return $length;
-                }
+            if ($body !== null) {
+                $options[CURLOPT_POSTFIELDS] = $body;
+            }
 
-                $name = strtolower(trim($parts[0]));
-                $value = trim($parts[1]);
-                if ($name !== '') {
-                    $responseHeaders[$name] = isset($responseHeaders[$name])
-                        ? $responseHeaders[$name] . ', ' . $value
-                        : $value;
-                }
+            curl_setopt_array($curl, $options);
 
-                return $length;
-            },
-        ];
+            $responseBody = curl_exec($curl);
+            $curlErrno = curl_errno($curl);
+            $curlError = curl_error($curl);
+            $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
 
-        if ($body !== null) {
-            $options[CURLOPT_POSTFIELDS] = $body;
+            curl_close($curl);
+
+            if ($responseBody === false) {
+                throw new RequestException('HTTP request failed: ' . $curlError, null, null, $curlErrno);
+            }
+
+            $responseBody = (string) $responseBody;
         }
-
-        curl_setopt_array($curl, $options);
-
-        $responseBody = curl_exec($curl);
-        $curlErrno = curl_errno($curl);
-        $curlError = curl_error($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
-
-        curl_close($curl);
-
-        if ($responseBody === false) {
-            throw new RequestException('HTTP request failed: ' . $curlError, null, null, $curlErrno);
-        }
-
-        $responseBody = (string) $responseBody;
 
         if ($statusCode < 200 || $statusCode >= 300) {
             throw new HTTPError($statusCode, $responseBody, $responseHeaders);
@@ -947,6 +1030,40 @@ final class Client
         }
 
         return $decoded;
+    }
+
+    /**
+     * @param array<string, mixed> $decoded
+     * @param array{status_code: int, body: string, headers: array<string, string>} $response
+     * @return array<string, mixed>
+     */
+    private function withRawResponse(array $decoded, array $response): array
+    {
+        $decoded['raw_response'] = [
+            'status_code' => $response['status_code'],
+            'headers' => $response['headers'],
+            'body' => $response['body'],
+        ];
+
+        return $decoded;
+    }
+
+    /**
+     * @param array<string, string> $headers
+     * @return array<string, string>
+     */
+    private function normalizeResponseHeaders(array $headers): array
+    {
+        $normalized = [];
+        foreach ($headers as $name => $value) {
+            $headerName = strtolower(trim((string) $name));
+            if ($headerName === '') {
+                continue;
+            }
+            $normalized[$headerName] = (string) $value;
+        }
+
+        return $normalized;
     }
 
     private function randomWechatUin(): string
