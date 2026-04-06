@@ -91,7 +91,7 @@ $client = new Client($token, [
   'base_url' => 'https://custom.endpoint.com',
   'cdn_base_url' => 'https://custom.cdn.com/c2c',
   'bot_type' => '3',
-  'version' => '1.0.2',
+  'version' => '2.1.6',
   'route_tag' => 'my-route-tag',
   'transport' => static function (
       string $method,
@@ -181,10 +181,7 @@ use OpenILink\Constants;
 foreach (($message['item_list'] ?? []) as $item) {
     switch ($item['type'] ?? null) {
         case Constants::ITEM_TYPE_IMAGE:
-            $data = $client->downloadFile(
-                (string) ($item['image_item']['media']['encrypt_query_param'] ?? ''),
-                (string) ($item['image_item']['media']['aes_key'] ?? ''),
-            );
+            $data = $client->downloadMedia($item['image_item']['media'] ?? null);
             break;
 
         case Constants::ITEM_TYPE_VOICE:

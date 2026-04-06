@@ -9,6 +9,8 @@ final class Constants
     public const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
     public const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
     public const DEFAULT_BOT_TYPE = '3';
+    public const ILINK_APP_ID = 'bot';
+    public const ILINK_CHANNEL_VERSION = '2.1.6';
 
     public const MESSAGE_TYPE_NONE = 0;
     public const MESSAGE_TYPE_USER = 1;

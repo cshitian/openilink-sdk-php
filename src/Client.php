@@ -27,6 +27,7 @@ final class Client
 
     private string $baseUrl;
     private string $cdnBaseUrl;
+    private string $loginBaseUrl;
     private string $token;
     private string $botType;
     private string $version;
@@ -53,9 +54,10 @@ final class Client
     {
         $this->baseUrl = (string) ($config['base_url'] ?? Constants::DEFAULT_BASE_URL);
         $this->cdnBaseUrl = (string) ($config['cdn_base_url'] ?? Constants::DEFAULT_CDN_BASE_URL);
+        $this->loginBaseUrl = (string) ($config['base_url'] ?? Constants::DEFAULT_BASE_URL);
         $this->token = $token;
         $this->botType = (string) ($config['bot_type'] ?? Constants::DEFAULT_BOT_TYPE);
-        $this->version = (string) ($config['version'] ?? '1.0.2');
+        $this->version = (string) ($config['version'] ?? Constants::ILINK_CHANNEL_VERSION);
         $this->routeTag = (string) ($config['route_tag'] ?? '');
         if (isset($config['silk_decoder']) && is_callable($config['silk_decoder'])) {
             $this->silkDecoder = $config['silk_decoder'];
@@ -246,15 +248,19 @@ final class Client
             'bot_type' => $this->botType !== '' ? $this->botType : Constants::DEFAULT_BOT_TYPE,
         ]);
 
+        $savedBaseUrl = $this->baseUrl;
+        $this->baseUrl = $this->loginBaseUrl;
         try {
             $response = $this->doGet(
                 $this->buildUrl('ilink/bot/get_bot_qrcode') . '?' . $query,
-                $this->routeTagHeaders(),
+                [],
                 self::DEFAULT_API_TIMEOUT_MS,
             );
         } catch (\Throwable $exception) {
+            $this->baseUrl = $savedBaseUrl;
             throw new RuntimeException('ilink: fetch QR code: ' . $exception->getMessage(), 0, $exception);
         }
+        $this->baseUrl = $savedBaseUrl;
 
         try {
             return $this->withRawResponse($this->decodeJson($response['body'], 'fetchQRCode'), $response);
@@ -263,14 +269,16 @@ final class Client
         }
     }
 
-    public function pollQRStatus(string $qrcode): array
+    public function pollQRStatus(string $qrcode, string $baseUrl = ''): array
     {
+        $base = $baseUrl !== '' ? $baseUrl : $this->baseUrl;
+        $base = rtrim($base, '/');
         $query = http_build_query(['qrcode' => $qrcode]);
 
         try {
             $response = $this->doGet(
-                $this->buildUrl('ilink/bot/get_qrcode_status') . '?' . $query,
-                $this->routeTagHeaders() + ['iLink-App-ClientVersion' => '1'],
+                $base . '/ilink/bot/get_qrcode_status?' . $query,
+                [],
                 self::QR_LONG_POLL_TIMEOUT_MS,
             );
         } catch (RequestException $exception) {
@@ -298,6 +306,7 @@ final class Client
     public function loginWithQr(array $callbacks = [], ?int $timeoutSeconds = null): array
     {
         $deadline = microtime(true) + ($timeoutSeconds ?? self::DEFAULT_LOGIN_TIMEOUT_SECONDS);
+        $qrBaseUrl = $this->loginBaseUrl;
         $qr = $this->fetchQRCode();
         $currentQr = (string) ($qr['qrcode'] ?? '');
 
@@ -305,10 +314,11 @@ final class Client
 
         $scannedNotified = false;
         $refreshCount = 1;
+        $pollBaseUrl = $qrBaseUrl;
 
         while (microtime(true) <= $deadline) {
             try {
-                $status = $this->pollQRStatus($currentQr);
+                $status = $this->pollQRStatus($currentQr, $pollBaseUrl);
             } catch (\Throwable $exception) {
                 throw new RuntimeException('ilink: poll QR status: ' . $exception->getMessage(), 0, $exception);
             }
@@ -318,6 +328,12 @@ final class Client
                     if (!$scannedNotified) {
                         $scannedNotified = true;
                         $this->invokeCallback($callbacks['on_scanned'] ?? null);
+                    }
+                    break;
+
+                case 'scaned_but_redirect':
+                    if (!empty($status['redirect_host'])) {
+                        $pollBaseUrl = 'https://' . $status['redirect_host'];
                     }
                     break;
 
@@ -506,13 +522,18 @@ final class Client
             throw new APIError((int) ($uploadResponse['ret'] ?? 0), 0, (string) ($uploadResponse['errmsg'] ?? ''));
         }
 
+        $fullUrl = trim((string) ($uploadResponse['upload_full_url'] ?? ''));
         $uploadParam = (string) ($uploadResponse['upload_param'] ?? '');
-        if ($uploadParam === '') {
-            throw new RuntimeException('ilink: getUploadUrl returned no upload_param');
+        if ($fullUrl !== '') {
+            $cdnUrl = $fullUrl;
+        } elseif ($uploadParam !== '') {
+            $cdnUrl = Cdn::buildUploadUrl($this->cdnBaseUrl, $uploadParam, $fileKey);
+        } else {
+            throw new RuntimeException('ilink: getUploadUrl returned no upload URL (need upload_full_url or upload_param)');
         }
 
         $ciphertext = Cdn::encryptAesEcb($plaintext, $aesKey);
-        $downloadParam = $this->uploadToCDN(Cdn::buildUploadUrl($this->cdnBaseUrl, $uploadParam, $fileKey), $ciphertext);
+        $downloadParam = $this->uploadToCDN($cdnUrl, $ciphertext);
 
         return [
             'file_key' => $fileKey,
@@ -668,25 +689,44 @@ final class Client
         }
     }
 
-    public function downloadFile(string $encryptedQueryParam, string $aesKeyBase64): string
+    public function downloadMedia(?array $media): string
     {
-        $key = Cdn::parseAESKey($aesKeyBase64);
-        $ciphertext = $this->downloadRaw($encryptedQueryParam);
+        if (!is_array($media)) {
+            throw new RuntimeException('ilink: media is nil');
+        }
+        $key = Cdn::parseAESKey((string) ($media['aes_key'] ?? ''));
+        $dlUrl = $this->resolveCDNDownloadURL($media);
+        $response = $this->request('GET', $dlUrl, [], null, self::DEFAULT_CDN_TIMEOUT_MS);
 
-        return Cdn::decryptAesEcb($ciphertext, $key);
+        return Cdn::decryptAesEcb($response['body'], $key);
     }
 
-    public function downloadRaw(string $encryptedQueryParam): string
+    public function downloadMediaRaw(?array $media): string
     {
-        $response = $this->request(
-            'GET',
-            Cdn::buildDownloadUrl($this->cdnBaseUrl, $encryptedQueryParam),
-            [],
-            null,
-            self::DEFAULT_CDN_TIMEOUT_MS,
-        );
+        if (!is_array($media)) {
+            throw new RuntimeException('ilink: media is nil');
+        }
+        $dlUrl = $this->resolveCDNDownloadURL($media);
+        $response = $this->request('GET', $dlUrl, [], null, self::DEFAULT_CDN_TIMEOUT_MS);
 
         return $response['body'];
+    }
+
+    /** @deprecated Use downloadMedia() which supports CDNMedia full_url. */
+    public function downloadFile(string $encryptedQueryParam, string $aesKeyBase64): string
+    {
+        return $this->downloadMedia([
+            'encrypt_query_param' => $encryptedQueryParam,
+            'aes_key' => $aesKeyBase64,
+        ]);
+    }
+
+    /** @deprecated Use downloadMediaRaw() which supports CDNMedia full_url. */
+    public function downloadRaw(string $encryptedQueryParam): string
+    {
+        return $this->downloadMediaRaw([
+            'encrypt_query_param' => $encryptedQueryParam,
+        ]);
     }
 
     public function downloadVoice(?array $voiceItem): string
@@ -700,10 +740,8 @@ final class Client
             throw new RuntimeException('ilink: voice item or media is nil');
         }
 
-        $encryptedQueryParam = (string) ($media['encrypt_query_param'] ?? '');
-        $aesKey = (string) ($media['aes_key'] ?? '');
         try {
-            $silkData = $this->downloadFile($encryptedQueryParam, $aesKey);
+            $silkData = $this->downloadMedia($media);
         } catch (\Throwable $exception) {
             throw new RuntimeException('ilink: download voice: ' . $exception->getMessage(), 0, $exception);
         }
@@ -755,12 +793,28 @@ final class Client
     }
 
     /**
+     * @return array<string, string>
+     */
+    private function commonHeaders(): array
+    {
+        $headers = [
+            'iLink-App-Id' => Constants::ILINK_APP_ID,
+            'iLink-App-ClientVersion' => (string) self::encodeClientVersion($this->version),
+        ];
+        if ($this->routeTag !== '') {
+            $headers['SKRouteTag'] = $this->routeTag;
+        }
+
+        return $headers;
+    }
+
+    /**
      * @param array<string, string> $extraHeaders
      * @return array<string, string>
      */
     private function buildHeaders(?string $body = null, array $extraHeaders = []): array
     {
-        $headers = [
+        $headers = $this->commonHeaders() + [
             'AuthorizationType' => 'ilink_bot_token',
             'X-WECHAT-UIN' => $this->randomWechatUin(),
         ] + $extraHeaders;
@@ -772,10 +826,6 @@ final class Client
         $token = trim($this->token);
         if ($token !== '') {
             $headers['Authorization'] = 'Bearer ' . $token;
-        }
-
-        if ($this->routeTag !== '') {
-            $headers['SKRouteTag'] = $this->routeTag;
         }
 
         return $headers;
@@ -792,16 +842,17 @@ final class Client
         ];
     }
 
-    /**
-     * @return array<string, string>
-     */
-    private function routeTagHeaders(): array
+    private function resolveCDNDownloadURL(array $media): string
     {
-        if ($this->routeTag === '') {
-            return [];
+        $fullUrl = (string) ($media['full_url'] ?? '');
+        if ($fullUrl !== '') {
+            return $fullUrl;
         }
-
-        return ['SKRouteTag' => $this->routeTag];
+        $encryptQueryParam = (string) ($media['encrypt_query_param'] ?? '');
+        if ($encryptQueryParam !== '') {
+            return Cdn::buildDownloadUrl($this->cdnBaseUrl, $encryptQueryParam);
+        }
+        throw new RuntimeException('ilink: cdn media has no full_url or encrypt_query_param');
     }
 
     /**
@@ -829,9 +880,9 @@ final class Client
     /**
      * @return array{status_code: int, body: string, headers: array<string, string>}
      */
-    private function doGet(string $url, array $headers, int $timeoutMs): array
+    private function doGet(string $url, array $extraHeaders, int $timeoutMs): array
     {
-        return $this->request('GET', $url, $headers, null, $timeoutMs);
+        return $this->request('GET', $url, $this->commonHeaders() + $extraHeaders, null, $timeoutMs);
     }
 
     /**
@@ -1076,7 +1127,7 @@ final class Client
 
     private function generateClientId(): string
     {
-        return sprintf('sdk-%d-%s', $this->nowMillis(), bin2hex(random_bytes(4)));
+        return sprintf('openclaw-weixin:%d-%s', $this->nowMillis(), bin2hex(random_bytes(4)));
     }
 
     private function nowMillis(): int
@@ -1116,5 +1167,15 @@ final class Client
 
             usleep(250000);
         }
+    }
+
+    private static function encodeClientVersion(string $version): int
+    {
+        $parts = array_map('intval', explode('.', $version));
+        $major = ($parts[0] ?? 0) & 0xff;
+        $minor = ($parts[1] ?? 0) & 0xff;
+        $patch = ($parts[2] ?? 0) & 0xff;
+
+        return ($major << 16) | ($minor << 8) | $patch;
     }
 }

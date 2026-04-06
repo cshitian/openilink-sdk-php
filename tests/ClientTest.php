@@ -46,7 +46,7 @@ assertSameValue($client->getToken(), 'mytoken', 'Client should preserve the prov
 assertSameValue($client->getBaseUrl(), Constants::DEFAULT_BASE_URL, 'Client should default the API base URL');
 assertSameValue($client->getCdnBaseUrl(), Constants::DEFAULT_CDN_BASE_URL, 'Client should default the CDN base URL');
 assertSameValue($client->getBotType(), Constants::DEFAULT_BOT_TYPE, 'Client should default the bot type');
-assertSameValue($client->getVersion(), '1.0.2', 'Client should default the channel version');
+assertSameValue($client->getVersion(), '2.1.6', 'Client should default the channel version');
 
 $custom = new Client('tok', [
     'base_url' => 'https://custom.example.com',
@@ -154,7 +154,7 @@ assertSameValue($requests[0]['headers']['Authorization'] ?? '', 'Bearer tok', 't
 assertSameValue($requests[0]['headers']['SKRouteTag'] ?? '', 'route-x', 'transport should receive the route tag header');
 $transportPayload = json_decode((string) ($requests[0]['body'] ?? ''), true, 512, JSON_THROW_ON_ERROR);
 assertSameValue($transportPayload['get_updates_buf'] ?? '', 'cursor-0', 'transport should receive the serialized request body');
-assertSameValue($transportPayload['base_info']['channel_version'] ?? '', '1.0.2', 'transport should receive base_info in serialized requests');
+assertSameValue($transportPayload['base_info']['channel_version'] ?? '', '2.1.6', 'transport should receive base_info in serialized requests');
 assertSameValue($requests[0]['timeout_ms'] ?? 0, 35000, 'transport should receive the configured timeout');
 
 try {
